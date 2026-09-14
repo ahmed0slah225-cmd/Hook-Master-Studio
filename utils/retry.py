@@ -17,24 +17,30 @@ def is_transient_error(exc: Exception) -> bool:
     return any(marker in text for marker in markers)
 
 
-def retry_transient(_func: F | None = None, *, max_attempts: int = 4, delay: int = 5):
-    """Retry transient AI/network failures while preserving normal exceptions.
+def retry_call(func: Callable[[], Any], *, max_attempts: int = 4, delay: int = 5):
+    """Execute a zero-argument callable with retries for transient failures."""
+    last = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func()
+        except Exception as exc:
+            last = exc
+            if not is_transient_error(exc) or attempt >= max_attempts:
+                raise
+            time.sleep(delay)
+    raise last
 
-    Supports both @retry_transient and @retry_transient(max_attempts=4, delay=5).
-    """
+
+def retry_transient(_func: F | None = None, *, max_attempts: int = 4, delay: int = 5):
+    """Decorator form for functions that need automatic transient-error retries."""
     def decorator(func: F) -> F:
         @wraps(func)
         def wrapper(*args, **kwargs):
-            last = None
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as exc:
-                    last = exc
-                    if not is_transient_error(exc) or attempt >= max_attempts:
-                        raise
-                    time.sleep(delay)
-            raise last
+            return retry_call(
+                lambda: func(*args, **kwargs),
+                max_attempts=max_attempts,
+                delay=delay,
+            )
         return wrapper  # type: ignore[return-value]
 
     if _func is not None:

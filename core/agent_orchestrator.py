@@ -5,6 +5,7 @@ from typing import Any
 from agents.critic_agent import CriticAgent
 from agents.humanizer_agent import HumanizerAgent
 from agents.hook_agent import HookAgent
+from config.models import HookCandidate
 
 
 class AgentOrchestrator:
@@ -22,19 +23,16 @@ class AgentOrchestrator:
         self.humanizer = HumanizerAgent(ai)
 
     def generate_candidates(self, analysis, script: str, audience: str, style: str):
-        candidates = []
+        candidates: list[HookCandidate] = []
         for hook_type in self.HOOK_TYPES:
-            raw = self.hook_agent.ask(
-                self._writer_prompt(analysis, script, audience, style, hook_type)
-            )
+            raw = self.hook_agent.ask(self._writer_prompt(analysis, script, audience, style, hook_type))
             text = self._extract_text(raw)
             if text:
-                candidates.append({"text": text, "hook_type": hook_type, "iteration": 0})
+                candidates.append(HookCandidate(text=text, hook_type=hook_type, iteration=0))
         return candidates
 
     def critique(self, hook: str, script: str) -> dict[str, Any]:
-        review = self.critic.review(hook, script)
-        return {"review": review}
+        return {"review": self.critic.review(hook, script)}
 
     def humanize(self, hook: str) -> str:
         return self._extract_text(self.humanizer.rewrite(hook))

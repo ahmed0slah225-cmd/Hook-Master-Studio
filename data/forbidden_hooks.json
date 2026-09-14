@@ -1,11 +1,24 @@
 {
-  "patterns": [
+  "phrases": [
     "أهلا بكم في الفيديو",
     "في فيديو النهارده هنتكلم",
     "لو عايز تنجح لازم",
     "5 خطوات هتغير حياتك",
     "معلومة خطيرة جدا",
-    "صدقني أنت محتاج تسمع الكلام ده"
+    "معلومة خطيرة جداً",
+    "صدقني أنت محتاج تسمع الكلام ده",
+    "خليني أقولك",
+    "تعالى أقولك",
+    "في الفيديو ده هنعرف",
+    "النهاردة هنعرف"
   ],
-  "reason": "generic, overused, direct, or artificial openings"
+  "patterns": [
+    "generic_intro",
+    "empty_clickbait",
+    "unearned_shock",
+    "fake_urgency",
+    "premature_summary",
+    "cta_before_value"
+  ],
+  "reason": "generic, overused, direct, artificial, or manipulative openings"
 }

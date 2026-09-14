@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable
 
 from config.models import PipelineState, HookResult
 from utils.api import GeminiService
+from utils.retry import is_transient_error
 from .agent_orchestrator import AgentOrchestrator
 from .script_analyzer import ScriptAnalyzer
 from .scoring_engine import ScoringEngine
@@ -14,9 +16,11 @@ from .ab_testing import HookABTester
 
 
 class HookPipeline:
-    """Multi-stage hook factory with checkpoints, critic loops and deterministic gates."""
+    """Multi-stage hook factory with checkpoints, critic loops and local retries."""
 
     MAX_CRITIC_ROUNDS = 2
+    MAX_ATTEMPTS = 4
+    RETRY_DELAY = 5
 
     def __init__(self, settings):
         self.settings = settings
@@ -41,20 +45,26 @@ class HookPipeline:
     def _continue_from_checkpoint(self):
         assert self.state is not None
         if self.state.analysis is None:
-            self.state.analysis = self.analyzer.analyze(self.state.script, self.state.audience, self.state.style)
-            self._checkpoint(1)
+            self._run_stage(1, lambda: self.analyzer.analyze(self.state.script, self.state.audience, self.state.style), "analysis")
+            self.state.analysis = self.state.checkpoints.pop("_stage_result")
 
         if not self.state.candidates:
-            self.state.candidates = self.agents.generate_candidates(
-                self.state.analysis, self.state.script, self.state.audience, self.state.style
+            self._run_stage(
+                2,
+                lambda: self.agents.generate_candidates(self.state.analysis, self.state.script, self.state.audience, self.state.style),
+                "generation",
             )
-            self._checkpoint(2)
+            self.state.candidates = self.state.checkpoints.pop("_stage_result")
 
         self.state.candidates = self.retention.refine_candidates(self.state.candidates, self.state.analysis)
         self._critic_loop()
 
         for candidate in self.state.candidates:
-            candidate.score = self.scorer.score(candidate, self.state.analysis, self.state.audience)
+            candidate.score = self._run_stage(
+                3,
+                lambda c=candidate: self.scorer.score(c, self.state.analysis, self.state.audience),
+                f"score_{candidate.hook_type}",
+            )
         self._checkpoint(3)
 
         accepted, rejected = self.quality_gate.filter(self.state.candidates, self.state.analysis)
@@ -64,14 +74,35 @@ class HookPipeline:
             self.state.winner = self.retention.final_polish(self.state.winner, self.state.analysis)
 
         experiment = self.ab_tester.compare(pool)
-        self.state.checkpoints["quality_gate"] = {
-            "accepted": len(accepted), "rejected": len(rejected)
-        }
+        self.state.checkpoints["quality_gate"] = {"accepted": len(accepted), "rejected": len(rejected)}
         self.state.checkpoints["ab_test"] = experiment.__dict__ if experiment else None
         self.state.completed = True
         self.state.stage = 5
         self._checkpoint(5)
         return self._result()
+
+    def _run_stage(self, stage: int, operation: Callable[[], Any], label: str):
+        assert self.state is not None
+        last = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            try:
+                result = operation()
+                self.state.checkpoints[f"{label}_attempts"] = attempt
+                self._checkpoint(stage)
+                return result
+            except Exception as exc:
+                last = exc
+                self.state.errors.append(f"{label} attempt {attempt}: {exc}")
+                self.state.attempts += 1
+                if not is_transient_error(exc) or attempt >= self.MAX_ATTEMPTS:
+                    raise
+                self.state.checkpoints[f"retry_{label}"] = {
+                    "attempt": attempt,
+                    "next_retry_seconds": self.RETRY_DELAY,
+                    "reason": str(exc),
+                }
+                time.sleep(self.RETRY_DELAY)
+        raise last
 
     def _critic_loop(self):
         assert self.state is not None and self.state.analysis is not None
@@ -79,13 +110,21 @@ class HookPipeline:
             changed = False
             for candidate in self.state.candidates:
                 gate = self.quality_gate.evaluate(candidate, self.state.analysis)
-                critique = self.agents.critique(candidate.text, self.state.script)
+                critique = self._run_stage(
+                    3,
+                    lambda c=candidate: self.agents.critique(c.text, self.state.script),
+                    f"critic_{candidate.hook_type}_r{round_no}",
+                )
                 review_text = critique.get("review", "")
                 candidate.retention_notes.append(f"critic_round_{round_no}: {review_text[:500]}")
 
-                if not gate["passed"] or len(review_text.strip()) > 0:
-                    rewritten = self.agents.rewrite_from_critique(
-                        candidate.text, review_text, self.state.analysis, self.state.audience
+                if not gate["passed"] or review_text.strip():
+                    rewritten = self._run_stage(
+                        3,
+                        lambda c=candidate, r=review_text: self.agents.rewrite_from_critique(
+                            c.text, r, self.state.analysis, self.state.audience
+                        ),
+                        f"rewrite_{candidate.hook_type}_r{round_no}",
                     )
                     if rewritten and rewritten != candidate.text:
                         candidate.text = rewritten
@@ -94,7 +133,6 @@ class HookPipeline:
 
                 candidate.text = self.retention._clean(candidate.text)
 
-            self.state.attempts += 1
             self.state.checkpoints[f"critic_round_{round_no}"] = {
                 "changed": changed,
                 "candidate_count": len(self.state.candidates),

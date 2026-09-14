@@ -1,8 +1,39 @@
-from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field, ConfigDict
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _coerce_text(value: Any) -> str:
+    """Make Gemini's occasionally structured values safe for string fields."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ": "))
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _coerce_text_list(value: Any) -> List[str]:
+    """Accept a string, list, or structured model output and normalize to strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [_coerce_text(item) for item in value]
+    return [_coerce_text(value)]
+
 
 class ScriptAnalysis(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
     title_or_premise: str = ""
     core_problem: str = ""
     audience: str = ""
@@ -19,12 +50,62 @@ class ScriptAnalysis(BaseModel):
     proof_points: List[str] = Field(default_factory=list)
     forbidden_angles: List[str] = Field(default_factory=list)
 
+    _string_fields = field_validator(
+        "title_or_premise",
+        "core_problem",
+        "audience",
+        "promise",
+        "transformation",
+        "unique_angle",
+        "stakes",
+        "hidden_question",
+        mode="before",
+    )(_coerce_text)
+
+    _list_fields = field_validator(
+        "strongest_moments",
+        "emotional_triggers",
+        "conflicts",
+        "curiosity_gaps",
+        "likely_objections",
+        "proof_points",
+        "forbidden_angles",
+        mode="before",
+    )(_coerce_text_list)
+
+
 class HookScore(BaseModel):
     total: float = 0
     dimensions: Dict[str, float] = Field(default_factory=dict)
     strengths: List[str] = Field(default_factory=list)
     weaknesses: List[str] = Field(default_factory=list)
     risk_flags: List[str] = Field(default_factory=list)
+
+    @field_validator("total", mode="before")
+    @classmethod
+    def _coerce_total(cls, value: Any) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @field_validator("dimensions", mode="before")
+    @classmethod
+    def _coerce_dimensions(cls, value: Any) -> Dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        result: Dict[str, float] = {}
+        for key, raw in value.items():
+            try:
+                result[str(key)] = float(raw)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    _strengths = field_validator("strengths", "weaknesses", "risk_flags", mode="before")(_coerce_text_list)
+
 
 class HookCandidate(BaseModel):
     text: str
@@ -35,12 +116,17 @@ class HookCandidate(BaseModel):
     humanized: bool = False
     iteration: int = 0
 
+    _candidate_text = field_validator("text", "hook_type", "rationale", mode="before")(_coerce_text)
+    _retention_notes = field_validator("retention_notes", mode="before")(_coerce_text_list)
+
+
 class HookResult(BaseModel):
     analysis: ScriptAnalysis
     candidates: List[HookCandidate] = Field(default_factory=list)
     winner: Optional[HookCandidate] = None
     explanation: str = ""
     quality_report: Dict[str, Any] = Field(default_factory=dict)
+
 
 class PipelineState(BaseModel):
     script: str

@@ -1,6 +1,6 @@
 from config.models import HookScore
 from config.constants import SCORE_DIMENSIONS
-from utils.retry import retry_transient
+from utils.retry import retry_call
 
 
 class ScoringEngine:
@@ -11,7 +11,7 @@ class ScoringEngine:
         prompt = f'''قيّم هذا الهوك كخبير Retention. لا تجامل. أعط درجات 0-10 للأبعاد: {', '.join(SCORE_DIMENSIONS)}.
 ثم strengths و weaknesses. total متوسط موزون: retention 20%, curiosity 18%, clarity 15%, emotion 12%, specificity 10%, tension 10%, credibility 5%, naturalness 10%.
 أعد JSON فقط. الهوك: {candidate.text}\nالتحليل: {analysis.model_dump_json()}\nالجمهور: {audience}'''
-        data = retry_transient(lambda: self.ai.generate_json(prompt))
+        data = retry_call(lambda: self.ai.generate_json(prompt), max_attempts=4, delay=5)
         return HookScore.model_validate(data)
 
     def score_batch(self, candidates, analysis, audience):
@@ -35,7 +35,7 @@ class ScoringEngine:
 أعد JSON array فقط:
 {{"index":0,"total":8.2,"dimensions":{{"clarity":8,"curiosity":9,"specificity":7,"emotion":8,"tension":8,"credibility":9,"retention":9,"naturalness":8}},"strengths":[],"weaknesses":[],"risk_flags":[]}}
 '''
-        data = retry_transient(lambda: self.ai.generate_json(prompt))
+        data = retry_call(lambda: self.ai.generate_json(prompt), max_attempts=4, delay=5)
         if isinstance(data, dict):
             data = data.get("scores", data.get("candidates", []))
         if not isinstance(data, list):

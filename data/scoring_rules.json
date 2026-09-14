@@ -1,0 +1,14 @@
+{
+  "weights": {
+    "retention": 0.20,
+    "curiosity": 0.18,
+    "clarity": 0.15,
+    "emotion": 0.12,
+    "specificity": 0.10,
+    "tension": 0.10,
+    "credibility": 0.05,
+    "naturalness": 0.10
+  },
+  "minimum_total": 7.0,
+  "red_flags": ["generic", "false promise", "unearned shock", "long setup", "AI-like phrasing"]
+}

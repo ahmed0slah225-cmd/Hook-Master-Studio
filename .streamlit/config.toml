@@ -1,0 +1,8 @@
+[theme]
+base = "dark"
+primaryColor = "#ff4b4b"
+
+[server]
+headless = true
+enableCORS = false
+maxUploadSize = 20

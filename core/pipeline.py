@@ -16,7 +16,7 @@ from .ab_testing import HookABTester
 
 
 class HookPipeline:
-    """Multi-stage hook factory with checkpoints, critic loops and local retries."""
+    """Multi-stage hook factory with resumable checkpoints and bounded critic loops."""
 
     MAX_CRITIC_ROUNDS = 2
     MAX_ATTEMPTS = 4
@@ -44,27 +44,33 @@ class HookPipeline:
 
     def _continue_from_checkpoint(self):
         assert self.state is not None
+
         if self.state.analysis is None:
-            self._run_stage(1, lambda: self.analyzer.analyze(self.state.script, self.state.audience, self.state.style), "analysis")
-            self.state.analysis = self.state.checkpoints.pop("_stage_result")
+            self.state.analysis = self._run_stage(
+                1,
+                lambda: self.analyzer.analyze(self.state.script, self.state.audience, self.state.style),
+                "analysis",
+            )
 
         if not self.state.candidates:
-            self._run_stage(
+            self.state.candidates = self._run_stage(
                 2,
-                lambda: self.agents.generate_candidates(self.state.analysis, self.state.script, self.state.audience, self.state.style),
+                lambda: self.agents.generate_candidates(
+                    self.state.analysis, self.state.script, self.state.audience, self.state.style
+                ),
                 "generation",
             )
-            self.state.candidates = self.state.checkpoints.pop("_stage_result")
 
         self.state.candidates = self.retention.refine_candidates(self.state.candidates, self.state.analysis)
         self._critic_loop()
 
-        for candidate in self.state.candidates:
-            candidate.score = self._run_stage(
-                3,
-                lambda c=candidate: self.scorer.score(c, self.state.analysis, self.state.audience),
-                f"score_{candidate.hook_type}",
-            )
+        self.state.candidates = self._run_stage(
+            3,
+            lambda: self.scorer.score_batch(
+                self.state.candidates, self.state.analysis, self.state.audience
+            ),
+            "batch_scoring",
+        )
         self._checkpoint(3)
 
         accepted, rejected = self.quality_gate.filter(self.state.candidates, self.state.analysis)
@@ -74,20 +80,25 @@ class HookPipeline:
             self.state.winner = self.retention.final_polish(self.state.winner, self.state.analysis)
 
         experiment = self.ab_tester.compare(pool)
-        self.state.checkpoints["quality_gate"] = {"accepted": len(accepted), "rejected": len(rejected)}
+        self.state.checkpoints["quality_gate"] = {
+            "accepted": len(accepted),
+            "rejected": len(rejected),
+            "rejected_types": [c.hook_type for c in rejected],
+        }
         self.state.checkpoints["ab_test"] = experiment.__dict__ if experiment else None
         self.state.completed = True
-        self.state.stage = 5
         self._checkpoint(5)
         return self._result()
 
     def _run_stage(self, stage: int, operation: Callable[[], Any], label: str):
+        """Retry only the failed operation; completed stages are never repeated on resume."""
         assert self.state is not None
         last = None
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
                 result = operation()
                 self.state.checkpoints[f"{label}_attempts"] = attempt
+                self.state.checkpoints[f"completed_{label}"] = True
                 self._checkpoint(stage)
                 return result
             except Exception as exc:
@@ -106,36 +117,49 @@ class HookPipeline:
 
     def _critic_loop(self):
         assert self.state is not None and self.state.analysis is not None
+
         for round_no in range(1, self.MAX_CRITIC_ROUNDS + 1):
-            changed = False
-            for candidate in self.state.candidates:
+            local_flags = []
+            for index, candidate in enumerate(self.state.candidates):
                 gate = self.quality_gate.evaluate(candidate, self.state.analysis)
-                critique = self._run_stage(
-                    3,
-                    lambda c=candidate: self.agents.critique(c.text, self.state.script),
-                    f"critic_{candidate.hook_type}_r{round_no}",
+                local_flags.append({"index": index, "passed": gate["passed"], "flags": gate["flags"]})
+
+            reviews = self._run_stage(
+                3,
+                lambda: self.agents.critique_candidates(
+                    self.state.candidates, self.state.script, self.state.analysis
+                ),
+                f"critic_round_{round_no}",
+            )
+
+            for review in reviews:
+                if not isinstance(review, dict):
+                    continue
+                try:
+                    index = int(review.get("index"))
+                    candidate = self.state.candidates[index]
+                except (ValueError, TypeError, IndexError):
+                    continue
+                candidate.retention_notes.append(
+                    f"critic_round_{round_no}: "
+                    f"{review.get('rewrite_direction', '')} "
+                    f"issues={review.get('issues', [])}"
                 )
-                review_text = critique.get("review", "")
-                candidate.retention_notes.append(f"critic_round_{round_no}: {review_text[:500]}")
 
-                if not gate["passed"] or review_text.strip():
-                    rewritten = self._run_stage(
-                        3,
-                        lambda c=candidate, r=review_text: self.agents.rewrite_from_critique(
-                            c.text, r, self.state.analysis, self.state.audience
-                        ),
-                        f"rewrite_{candidate.hook_type}_r{round_no}",
-                    )
-                    if rewritten and rewritten != candidate.text:
-                        candidate.text = rewritten
-                        candidate.iteration += 1
-                        changed = True
-
-                candidate.text = self.retention._clean(candidate.text)
-
+            before = [c.text for c in self.state.candidates]
+            self.state.candidates = self._run_stage(
+                3,
+                lambda: self.agents.rewrite_candidates(
+                    self.state.candidates, reviews, self.state.analysis, self.state.audience
+                ),
+                f"rewrite_round_{round_no}",
+            )
+            changed = before != [c.text for c in self.state.candidates]
+            self.state.checkpoints[f"critic_round_{round_no}_local_flags"] = local_flags
             self.state.checkpoints[f"critic_round_{round_no}"] = {
                 "changed": changed,
                 "candidate_count": len(self.state.candidates),
+                "reviews": len(reviews),
             }
             if not changed:
                 break
@@ -162,7 +186,6 @@ class HookPipeline:
         score = winner.score.total if winner.score else 0
         return (
             f"الهوك الفائز مبني على زاوية {winner.hook_type}. "
-            f"مرّ على تحليل السكريبت ثم الكتابة والنقد وإعادة الصياغة وبوابة الجودة. "
-            f"الهدف هو فتح فجوة فضول حقيقية وربط البداية بأقوى نقطة في المحتوى. "
-            f"التقييم النهائي: {score:.1f}/100."
+            f"مرّ على تحليل السكريبت، غرفة الكتابة، النقد، إعادة الصياغة، "
+            f"وبوابة الجودة قبل الاختيار. التقييم النهائي: {score:.1f}/100."
         )

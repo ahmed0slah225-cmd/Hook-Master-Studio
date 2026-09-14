@@ -45,6 +45,9 @@ class HookPipeline:
     def _continue_from_checkpoint(self):
         assert self.state is not None
 
+        if self.state.completed and self.state.winner is not None:
+            return self._result()
+
         if self.state.analysis is None:
             self.state.analysis = self._run_stage(
                 1,
@@ -62,15 +65,19 @@ class HookPipeline:
             )
 
         self.state.candidates = self.retention.refine_candidates(self.state.candidates, self.state.analysis)
-        self._critic_loop()
 
-        self.state.candidates = self._run_stage(
-            3,
-            lambda: self.scorer.score_batch(
-                self.state.candidates, self.state.analysis, self.state.audience
-            ),
-            "batch_scoring",
-        )
+        critic_done = any(k.startswith("completed_rewrite_round_") for k in self.state.checkpoints)
+        if not critic_done:
+            self._critic_loop()
+
+        if any(candidate.score is None for candidate in self.state.candidates):
+            self.state.candidates = self._run_stage(
+                3,
+                lambda: self.scorer.score_batch(
+                    self.state.candidates, self.state.analysis, self.state.audience
+                ),
+                "batch_scoring",
+            )
         self._checkpoint(3)
 
         accepted, rejected = self.quality_gate.filter(self.state.candidates, self.state.analysis)
@@ -187,5 +194,5 @@ class HookPipeline:
         return (
             f"الهوك الفائز مبني على زاوية {winner.hook_type}. "
             f"مرّ على تحليل السكريبت، غرفة الكتابة، النقد، إعادة الصياغة، "
-            f"وبوابة الجودة قبل الاختيار. التقييم النهائي: {score:.1f}/100."
+            f"وبوابة الجودة قبل الاختيار. التقييم النهائي: {score:.1f}/10."
         )

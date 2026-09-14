@@ -1,13 +1,25 @@
 from __future__ import annotations
+
 import re
 from config.models import HookCandidate, ScriptAnalysis
 
+
 class RetentionEngine:
-    """Deterministic retention pass: removes generic openings and strengthens open loops."""
+    """Deterministic retention pass: removes generic openings and strengthens open loops.
+
+    The engine is intentionally deterministic for the moment, but accepts an optional
+    AI service so it can be upgraded later without breaking the pipeline constructor.
+    """
+
     BANNED_OPENERS = (
         "أهلا بيكم", "اهلا بيكم", "في الفيديو ده", "في فيديو النهاردة",
         "النهاردة هنتكلم", "لو عايز", "لو كنت", "تعالى أقولك", "خليني أقولك"
     )
+
+    def __init__(self, ai=None):
+        # Optional dependency keeps RetentionEngine compatible with both the
+        # deterministic implementation and future AI-assisted retention passes.
+        self.ai = ai
 
     def refine_candidates(self, candidates, analysis):
         refined = []
@@ -34,14 +46,14 @@ class RetentionEngine:
         return winner
 
     def _clean(self, text):
-        text = re.sub(r"^\s*[\"'«»]+|[\"'«»]+\s*$", "", text or "")
-        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r'^\s*[\"\'«»]+|[\"\'«»]+\s*$', '', text or '')
+        text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
     def _remove_meta_language(self, text):
-        patterns = [r"^الهوك[:：]\s*", r"^Hook[:：]\s*", r"^الافتتاحية[:：]\s*"]
+        patterns = [r'^الهوك[:：]\s*', r'^Hook[:：]\s*', r'^الافتتاحية[:：]\s*']
         for pattern in patterns:
-            text = re.sub(pattern, "", text, flags=re.I)
+            text = re.sub(pattern, '', text, flags=re.I)
         return text
 
     def _has_open_loop(self, text):

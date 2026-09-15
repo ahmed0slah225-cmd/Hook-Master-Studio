@@ -1,1 +1,0 @@
-"""Specialized hook-generation strategies."""

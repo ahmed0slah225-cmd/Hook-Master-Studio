@@ -7,27 +7,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _coerce_text(value: Any) -> str:
-    """Make Gemini's occasionally structured values safe for string fields."""
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, (dict, list, tuple)):
         try:
-            return json.dumps(value, ensure_ascii=False, separators=(",", ": "))
-        except (TypeError, ValueError):
-            return str(value)
+            if isinstance(value, dict):
+                readable = []
+                for key, item in value.items():
+                    readable.append(f"{key}: {_coerce_text(item)}")
+                return " — ".join(readable)
+            return " — ".join(_coerce_text(item) for item in value)
+        except Exception:
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
     return str(value)
 
 
 def _coerce_text_list(value: Any) -> List[str]:
-    """Accept a string, list, or structured model output and normalize to strings."""
     if value is None:
         return []
     if isinstance(value, str):
         return [value]
     if isinstance(value, (list, tuple)):
-        return [_coerce_text(item) for item in value]
+        return [_coerce_text(item) for item in value if item is not None]
     return [_coerce_text(value)]
 
 
@@ -51,26 +57,13 @@ class ScriptAnalysis(BaseModel):
     forbidden_angles: List[str] = Field(default_factory=list)
 
     _string_fields = field_validator(
-        "title_or_premise",
-        "core_problem",
-        "audience",
-        "promise",
-        "transformation",
-        "unique_angle",
-        "stakes",
-        "hidden_question",
-        mode="before",
+        "title_or_premise", "core_problem", "audience", "promise", "transformation",
+        "unique_angle", "stakes", "hidden_question", mode="before"
     )(_coerce_text)
 
     _list_fields = field_validator(
-        "strongest_moments",
-        "emotional_triggers",
-        "conflicts",
-        "curiosity_gaps",
-        "likely_objections",
-        "proof_points",
-        "forbidden_angles",
-        mode="before",
+        "strongest_moments", "emotional_triggers", "conflicts", "curiosity_gaps",
+        "likely_objections", "proof_points", "forbidden_angles", mode="before"
     )(_coerce_text_list)
 
 
@@ -84,8 +77,6 @@ class HookScore(BaseModel):
     @field_validator("total", mode="before")
     @classmethod
     def _coerce_total(cls, value: Any) -> float:
-        if isinstance(value, (int, float)):
-            return float(value)
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -104,7 +95,7 @@ class HookScore(BaseModel):
                 continue
         return result
 
-    _strengths = field_validator("strengths", "weaknesses", "risk_flags", mode="before")(_coerce_text_list)
+    _text_lists = field_validator("strengths", "weaknesses", "risk_flags", mode="before")(_coerce_text_list)
 
 
 class HookCandidate(BaseModel):

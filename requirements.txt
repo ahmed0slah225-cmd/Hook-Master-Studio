@@ -1,3 +1,0 @@
-streamlit
-google-genai
-pydantic>=2.0

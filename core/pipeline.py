@@ -63,10 +63,19 @@ class HookPipeline:
                 ),
                 "generation",
             )
+            # A previous run may have failed the final gate. New candidates get
+            # their own critic/scoring cycle instead of inheriting stale flags.
+            self.state.checkpoints.pop("no_winner", None)
+            for key in list(self.state.checkpoints):
+                if key.startswith("completed_critic_round_") or key.startswith("completed_rewrite_round_"):
+                    self.state.checkpoints.pop(key, None)
 
         self.state.candidates = self.retention.refine_candidates(self.state.candidates, self.state.analysis)
 
-        critic_done = any(k.startswith("completed_rewrite_round_") for k in self.state.checkpoints)
+        critic_done = (
+            any(k.startswith("completed_rewrite_round_") for k in self.state.checkpoints)
+            and not self.state.checkpoints.get("no_winner")
+        )
         if not critic_done:
             self._critic_loop()
 
@@ -81,9 +90,6 @@ class HookPipeline:
         self._checkpoint(3)
 
         accepted, rejected = self.quality_gate.filter(self.state.candidates, self.state.analysis)
-
-        # A rejected hook is never promoted as a fallback. This is intentional:
-        # a polished but structurally weak opener must not beat a real hook.
         pool = accepted
         self.state.winner = self.selector.select(pool, self.state.analysis)
         if self.state.winner:
@@ -102,10 +108,17 @@ class HookPipeline:
         self.state.checkpoints["ab_test"] = experiment.__dict__ if experiment else None
 
         if self.state.winner is None:
+            # Keep evidence of the failed pool for diagnostics, but clear the
+            # working pool so a manual resume creates fresh candidates.
             self.state.checkpoints["no_winner"] = True
+            self.state.checkpoints["last_rejected_hooks"] = [
+                {"hook_type": c.hook_type, "text": c.text}
+                for c in self.state.candidates
+            ]
+            self.state.candidates = []
             self.state.completed = False
             raise RuntimeError(
-                "لم ينجح أي هوك في بوابة الجودة. تم منع اختيار هوك ضعيف تلقائيًا؛ أعد المحاولة لإعادة توليد الهوكات."
+                "لم ينجح أي هوك في بوابة الجودة. تم منع اختيار هوك ضعيف تلقائيًا؛ إعادة المحاولة ستولد مجموعة جديدة."
             )
 
         self.state.completed = True

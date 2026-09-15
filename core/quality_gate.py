@@ -36,12 +36,11 @@ class QualityGate:
             flags.append("meta_or_cta")
         if text.count("!") > 3:
             flags.append("overhyped")
-        if any(normalized.startswith(x.lower()) for x in GENERIC_OPENERS):
+        if any(normalized.startswith(x.lower()) for x in self.GENERIC_OPENERS):
             flags.append("generic_opener")
-        if any(normalized.startswith(x.lower()) for x in SCENE_OPENERS):
+        if any(normalized.startswith(x.lower()) for x in self.SCENE_OPENERS):
             flags.append("scene_setting_without_immediate_hook")
 
-        # A useful hook needs at least one concrete hook payload signal.
         hook_signals = (
             "ليه", "إزاي", "ازاي", "المشكلة", "الغريب", "المفاجأة", "الحقيقة",
             "بس", "لكن", "السبب", "أخطر", "أغلب", "مش زي", "مش إن", "كنت فاكر",
@@ -50,9 +49,10 @@ class QualityGate:
         if not any(signal in normalized for signal in hook_signals):
             flags.append("weak_hook_payload")
 
-        # Curiosity types should leave an unresolved gap, but don't require a literal question mark.
         if candidate.hook_type in {"curiosity", "open-loop", "contradiction"}:
-            has_question = "؟" in text or "?" in text or any(x in normalized for x in ("ليه", "إزاي", "ازاي", "إيه", "ايه"))
+            has_question = "؟" in text or "?" in text or any(
+                x in normalized for x in ("ليه", "إزاي", "ازاي", "إيه", "ايه")
+            )
             if not has_question:
                 flags.append("weak_curiosity_gap")
 

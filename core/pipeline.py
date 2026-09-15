@@ -16,7 +16,7 @@ from .ab_testing import HookABTester
 
 
 class HookPipeline:
-    """Multi-stage hook factory with resumable checkpoints and bounded critic loops."""
+    """Multi-stage hook factory with resumable checkpoints and hard final quality gates."""
 
     MAX_CRITIC_ROUNDS = 2
     MAX_ATTEMPTS = 4
@@ -81,8 +81,11 @@ class HookPipeline:
         self._checkpoint(3)
 
         accepted, rejected = self.quality_gate.filter(self.state.candidates, self.state.analysis)
-        pool = accepted or self.state.candidates
-        self.state.winner = self.selector.select(pool)
+
+        # A rejected hook is never promoted as a fallback. This is intentional:
+        # a polished but structurally weak opener must not beat a real hook.
+        pool = accepted
+        self.state.winner = self.selector.select(pool, self.state.analysis)
         if self.state.winner:
             self.state.winner = self.retention.final_polish(self.state.winner, self.state.analysis)
 
@@ -91,8 +94,20 @@ class HookPipeline:
             "accepted": len(accepted),
             "rejected": len(rejected),
             "rejected_types": [c.hook_type for c in rejected],
+            "rejected_reasons": {
+                c.hook_type: self.quality_gate.evaluate(c, self.state.analysis)["flags"]
+                for c in rejected
+            },
         }
         self.state.checkpoints["ab_test"] = experiment.__dict__ if experiment else None
+
+        if self.state.winner is None:
+            self.state.checkpoints["no_winner"] = True
+            self.state.completed = False
+            raise RuntimeError(
+                "لم ينجح أي هوك في بوابة الجودة. تم منع اختيار هوك ضعيف تلقائيًا؛ أعد المحاولة لإعادة توليد الهوكات."
+            )
+
         self.state.completed = True
         self._checkpoint(5)
         return self._result()
@@ -193,6 +208,6 @@ class HookPipeline:
         score = winner.score.total if winner.score else 0
         return (
             f"الهوك الفائز مبني على زاوية {winner.hook_type}. "
-            f"مرّ على تحليل السكريبت، غرفة الكتابة، النقد، إعادة الصياغة، "
+            f"تم اختباره كسبب للمشاهدة، ثم مرّ على النقد، إعادة الصياغة، "
             f"وبوابة الجودة قبل الاختيار. التقييم النهائي: {score:.1f}/10."
         )
